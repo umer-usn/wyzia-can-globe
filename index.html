@@ -8,16 +8,16 @@
   :root {
     --ink: #ffffff;
     --accent: #ff5900;
-    --scroll-length: 500vh; /* how much scrolling the whole journey takes */
   }
   * { box-sizing: border-box; }
   /* Transparent on purpose: inside an iframe the globe sits straight on the host page's black.
      (When opened on its own, a black backdrop is added by the script below.) */
-  html, body { margin: 0; background: transparent; color: var(--ink); }
+  /* The document itself never scrolls, so inside an iframe the host page keeps scrolling normally;
+     the globe is driven by wheel / touch / key input captured by the script below. */
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: var(--ink); }
   body { font-family: "Inter", "Helvetica Neue", system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
 
-  #track { height: var(--scroll-length); position: relative; }
-  #stage { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden; }
+  #stage { position: fixed; inset: 0; overflow: hidden; }
 
   /* the globe fades out toward the bottom and the sides so it melts into the page instead of ending in an edge */
   #globe {
@@ -58,12 +58,10 @@
 </style>
 </head>
 <body>
-<div id="track">
-  <div id="stage">
+<div id="stage">
     <canvas id="globe" aria-label="Globe turning across a map of Canada" role="img"></canvas>
     <div id="copy"><div id="card"></div><div id="dots"></div></div>
     <div id="nogl">This animation needs WebGL, which isn't available in this browser.</div>
-  </div>
 </div>
 
 <script>// https://d3js.org/d3-array/ v3.2.4 Copyright 2010-2023 Mike Bostock
@@ -98,6 +96,8 @@
     { at: 0.50, lon: -97,  lat: 54, body: "Controls built to each regulator’s standards for AML, responsible gambling and player protection" },
     { at: 0.82, lon: -68,  lat: 51, body: "Reporting and records that satisfy both the provincial regulator and FINTRAC" }
   ];
+  // How much scrolling the whole journey takes, as a percentage of the section's height.
+  var SCROLL_LENGTH_VH = 400;
   // The globe starts (scroll = 0) and ends (scroll = 1) a little beyond Canada's coasts.
   var START = { lon: -150, lat: 50 };
   var END   = { lon: -52,  lat: 50 };
@@ -105,9 +105,9 @@
   // Camera is fixed in space, a bit south of whatever is in focus, looking north toward the horizon.
   var CAM = {
     fov: 50,        // vertical field of view (degrees)
-    dist: 1.6,      // distance from globe centre (globe radius = 1)
+    dist: 1.55,     // distance from globe centre (globe radius = 1)
     elev: 12,       // how far south of the focus point the camera sits (degrees of arc)
-    ahead: 18       // how far north of the focus point the camera aims (degrees of arc)
+    ahead: 4        // how far north of the focus point the camera aims (degrees of arc)
   };
 
   var COLORS = {
@@ -244,24 +244,56 @@
     var portrait = W < H;
     camera.aspect = W / H;
     camera.fov = portrait ? Math.min(75, CAM.fov * (1 + (H / W - 1) * .55)) : CAM.fov;
+    if (portrait) camera.setViewOffset(W, H, 0, H * 0.16, W, H); else camera.clearViewOffset();   // portrait: lift the globe, less empty sky
     camera.updateProjectionMatrix();
   }
 
-  // ---- scroll progress ----
+  // ---- input: the globe advances with scroll gestures while it is on screen, then hands scrolling back to the page ----
   var target = 0, current = 0, forced = null;
-  function readScroll() {
-    var max = document.documentElement.scrollHeight - window.innerHeight;
-    target = max > 0 ? Math.max(0, Math.min(1, window.scrollY / max)) : 0;
+  var active = true, onScreen = true;     // `active` = enough of the globe is in view to take over scrolling
+  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+  // Returns true if the globe used the gesture. At the start/end of the journey it returns false, so the
+  // browser scrolls the host page instead and the page carries on.
+  function push(px) {
+    if (!active || !px) return false;
+    if ((px > 0 && target >= 1) || (px < 0 && target <= 0)) return false;
+    target = clamp01(target + px / (SCROLL_LENGTH_VH / 100 * H));
+    return true;
   }
-  window.addEventListener("scroll", readScroll, { passive: true });
-  window.addEventListener("resize", function () { resize(); readScroll(); });
+
+  window.addEventListener("wheel", function (e) {
+    if (e.ctrlKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;            // pinch-zoom / sideways: leave alone
+    var d = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? H : 1);
+    if (push(d) && e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  var touchY = null;
+  window.addEventListener("touchstart", function (e) { touchY = e.touches.length === 1 ? e.touches[0].clientY : null; }, { passive: true });
+  window.addEventListener("touchmove", function (e) {
+    if (touchY === null || e.touches.length !== 1) return;
+    var y = e.touches[0].clientY, d = (touchY - y) * 1.15; touchY = y;
+    if (push(d) && e.cancelable) e.preventDefault();
+  }, { passive: false });
+  window.addEventListener("touchend", function () { touchY = null; }, { passive: true });
+
+  window.addEventListener("keydown", function (e) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    var d = { ArrowDown: .1, ArrowUp: -.1, PageDown: .45, PageUp: -.45, " ": e.shiftKey ? -.45 : .45 }[e.key];
+    if (d && push(d * H) && e.cancelable) e.preventDefault();
+  });
+
+  window.addEventListener("resize", resize);
   if (window.ResizeObserver) new ResizeObserver(resize).observe(stage);
   // optional: a host page can drive the globe with postMessage({type:"globe-progress", value:0..1}, "*")
   window.addEventListener("message", function (e) {
     if (e.data && e.data.type === "globe-progress" && typeof e.data.value === "number") forced = e.data.value;
   });
-  var onScreen = true;
-  if (window.IntersectionObserver) new IntersectionObserver(function (e) { onScreen = e[0].isIntersecting; }).observe(stage);
+  // Inside a cross-origin iframe this observes the *top-level* viewport, so we know when the section is really on screen.
+  if (window.IntersectionObserver) new IntersectionObserver(function (e) {
+    var r = e[0].intersectionRatio;
+    onScreen = r > 0; active = r >= 0.6;
+  }, { threshold: [0, 0.2, 0.4, 0.6, 0.8, 1] }).observe(stage);
 
   // ---- per-frame ----
   function smooth(x) { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); }
@@ -292,7 +324,7 @@
   }
 
   // ---- go (paint the big texture after first paint so the page doesn't stall) ----
-  placeCamera(); resize(); readScroll(); current = target;
+  placeCamera(); resize(); current = target;
   setTimeout(function () {
     var big = maxTex >= 8192 && !("ontouchstart" in window) && Math.min(screen.width, screen.height) >= 700;
     var W2 = big ? 8192 : Math.min(4096, maxTex);
